@@ -7,11 +7,11 @@ __license__ = ('This software is released under rev. 42 of the Beer-Ware '
                'If we meet some day, and you think it\'s worth it, you can '
                'buy me a beer in return. --Steve')
 
-import serial, threading, Queue, time
+import serial, threading, queue, time
 
 class Dacta:
     _ser = None # serial object for raw comms
-    _outQueue = Queue.Queue() # queue for outgoing comms
+    _outQueue = queue.Queue() # queue for outgoing comms
     _threadList = [] # list of active threads -- in, out, and keepalive
     _running = threading.Event() # used to safely shut things down on close()
 
@@ -23,9 +23,9 @@ class Dacta:
     _sensorLock = threading.Lock() # mutex for sensor values
 
     # initialization strings
-    _INIT_ON = 'p\0'
-    _INIT_START = '###Do you byte, when I knock?$$$'
-    _INIT_RETURN = '###Just a bit off the block!$$$'
+    _INIT_ON = b'p\0'
+    _INIT_START = b'###Do you byte, when I knock?$$$'
+    _INIT_RETURN = b'###Just a bit off the block!$$$'
 
     # commands from http://www.blockcad.net/dacta/
     CMD_NOP = '\x02'
@@ -67,9 +67,9 @@ class Dacta:
     def taskWrite(self):
         """ Internal task to write commands to the serial port if available. """
         while self._running.isSet():
-            item = self._outQueue.get(block=True)
+            item = self._outQueue.get(block=True).encode()
             if self._ser == None:
-                print repr(item)
+                print(repr(item))
             else:
                 self._ser.write(item)
 
@@ -102,25 +102,28 @@ class Dacta:
     def taskRead(self):
         """ Internal state machine to read data from the 70909 / 9751. """
         if self._ser == None:
-            print "Note: no inputs are available."
+            print("Note: no inputs are available.")
             return
 
         buff = self._ser.read(19)
 
         while self._running.isSet():
-            if buff[0] == '\0' and len(buff) == 19:
+            # if buff[0] == '\0' and len(buff) == 19:
+            if buff[0] == 0 and len(buff) == 19:
                 checksum = 0
                 for c in buff:
-                    checksum += ord(c)
+                    # checksum += ord(c)
+                    checksum += c
                 if (checksum & 0xff) == 0xff:
-                    #print "Got a packet!" # debug
-                    #print repr(buff) # debug
+                    # print("Got a packet!") # debug
+                    # print(repr(buff)) # debug
                     
                     self._sensorLock.acquire()
                     (self._sensorValues[0], self._sensorStatus[0], change) = self._decodeInput(buff[14],buff[15]);
                     (self._sensorValues[1], self._sensorStatus[1], change) = self._decodeInput(buff[10],buff[11]);
                     (self._sensorValues[2], self._sensorStatus[2], change) = self._decodeInput(buff[6],buff[7]);
                     (self._sensorValues[3], self._sensorStatus[3], change) = self._decodeInput(buff[2],buff[3]);
+                    
                     (self._sensorValues[4], self._sensorStatus[4], change) = self._decodeInput(buff[16],buff[17]);
                     self._rotations[4] += change
                     (self._sensorValues[5], self._sensorStatus[5], change) = self._decodeInput(buff[12],buff[13]);
@@ -131,19 +134,54 @@ class Dacta:
                     self._rotations[7] += change
                     self._sensorLock.release()
                     
-                    buff = 'x' + self._ser.read(18) # getting ready to go around again
+                    # getting ready to go around again;
+                    buff = b'x' + self._ser.read(18)  # the 'x' drops off at the buff[1:] at the end of the while loop
                     while len(buff) < 19: # only happens if above read times out
+                        print("Warning: missed a packet.")
                         buff = buff + self._ser.read(1)
 
-            buff = buff[1:] + self._ser.read(1)
+            buff = buff[1:] + self._ser.read(1)  # shift buffer left and read one byte
 
     def _decodeInput(self, b1, b2):
-        """ Internal function to unpack bitfields from 70909 / 9751 """
-        value = (ord(b1) << 2) | ((ord(b2) >> 6) & 0x03)
-        state = ord(b2) & 0x3F
+        """
+        Internal function to unpack bitfields from 70909 / 9751 
+
+        << is bitshift operator: n << m = shift n left by m bits
+        | is bitwise OR operator: n | m = bitwise OR of n and m
+        >> is bitshift operator: n >> m = shift n right by m bits
+        & is bitwise AND operator: n & m = bitwise AND of n and m
+
+        input value is 2 bytes (b1, b2), with the following format:
+        aaaaaaaa aaxxxxxxxx          
+
+        a = analog value (10 bits)  (0-1023) - is this right, or is it 12?
+        x = status value (6 bits)   
+      
+        """
+
+        # # 1 - shift b1 left by 2 bits (by pushing in two 0s on the right), to make it a 10 bit number
+        # # (aaaaaaa -> aaaaaaaa00)
+        # # 2 - shift b2 right by 6 bits by pushing copies of the leftmost bit in from the left 
+        # # and let the rightmost bits fall off, then bitwise AND with 0x03 (0000 0011),
+        # # setting all the bits from b2 other than the rightmost two bits to 0 (aaxxxxxxxx -> 000000aa)
+        # # 3 -  bitwise OR of b1 and what is left of b2 (the original 2 leftmost bits) (aaaaaaaa00 | 000000aa = aaaaaaaaaa)
+        # value = (ord(b1) << 2) | ((ord(b2) >> 6) & 0x03)
+        value = (b1 << 2) | ((b2 >> 6) & 0x03)
+        
+        # # 0x3F = 63 = 0011 1111 - assigns to 'state' the value of b2 bitwise ANDed with constant 0x3F. 
+        # # This has the effect of setting the leftmost two bits in b2 to 0 and preserving the 
+        # # rightmost 6 bits (status value) from b2
+        # state = ord(b2) & 0x3F
+        state = b2 & 0x3F  
+
+        # # 3 = 0000 0011 - assigns to 'change' the value of state bitwise ANDed with constant 3. 
+        # # This has the effect of setting all the bits in state other than the rightmost two bits to 0
+        # # and preserving the rightmost bits from state. 
         change = state & 3
+        
         if state & 4 == 0:
             change *= -1
+        
         return (value, state, change)
 
     def getSensors(self):
@@ -200,12 +238,12 @@ class Dacta:
     def close(self):
         """ Safely terminates helper threads and closes serial port. """
         
-        print "Shutting down."
+        print("Shutting down.")
         self._outQueue.put(self.CMD_KILLALL)
         time.sleep(0.5)
         self._running.clear()
         for thread in self._threadList:
-            while thread.isAlive():
+            while thread.is_alive():
                 time.sleep(0.1)
         if self._ser != None:
             self._ser.close()
@@ -217,23 +255,31 @@ class Dacta:
         
         try:
             self._ser = serial.Serial(comPort, 9600, timeout = 2)
+            # print('port opened')
         except serial.SerialException:
-            print "Could not open port " + repr(comPort) + "; using stdout instead."
+            print("Could not open port " + repr(comPort) + "; using stdout instead.")
             self._ser = None
 
         self._threadList.append(threading.Thread(target = self.taskKeepAlive))
         self._threadList.append(threading.Thread(target = self.taskWrite))
         self._threadList.append(threading.Thread(target = self.taskRead))
 
+        # print("threads appended to threadList")
+
         if self._ser != None:
+            # print("self._ser is not None")
             self._ser.write(self._INIT_ON)
+            # print("wrote _INIT_ON")
             # should probably do something with return values here, but I'm lazy
             self._ser.write(self._INIT_START)
+            # print("wrote _INIT_START")
             confirmation = self._ser.read(len(self._INIT_RETURN))
+            # print(f"confirmation {confirmation}, {self._INIT_RETURN}")
+            # print(confirmation == self._INIT_RETURN)
             while confirmation != self._INIT_RETURN:
-                print confirmation # debug
+                # print(confirmation) # debug
                 confirmation = confirmation[1:] + self._ser.read(1)
-            print "Got confirmation string."
+            print("Got confirmation string.")
 
         self._running.set()
         for thread in self._threadList:
