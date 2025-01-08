@@ -28,17 +28,20 @@ class Dacta:
     _INIT_RETURN = b'###Just a bit off the block!$$$'
 
     # commands from http://www.blockcad.net/dacta/
-    CMD_NOP = '\x02'
-    CMD_PORTONL = '\x10'
-    CMD_PORTONR = '\x18'
-    CMD_PORTREV = '\x20'
-    CMD_PORTONX = '\x28'
-    CMD_PORTOFF = '\x30' # check to see if low nibble does anything
-    CMD_PORTDRL = '\x40'
-    CMD_PORTDRR = '\x48'
-    CMD_KILLALL = '\x70' # completely disconnects interface
+    CMD_NOP = '\x02'        # 0000 0010
 
-    _PARAM_POWER = '\xb0'
+                            # xxxx xppp where x the command and p is port number (0-7)
+    CMD_PORTONL = '\x10'    # 0001 0000
+    CMD_PORTONR = '\x18'    # 0001 1000
+    CMD_PORTREV = '\x20'    # 0010 0000
+    CMD_PORTONX = '\x28'    # 0010 1000
+    CMD_PORTOFF = '\x30'    # 0011 0000  # check to see if low nibble does anything
+    CMD_PORTDRL = '\x40'    # 0100 0000
+    CMD_PORTDRR = '\x48'    # 0100 1000
+    CMD_KILLALL = '\x70'    # 0111 0000  # completely disconnects interface
+
+                            # xxxx xsss oooooooo where x the command, s is power setting and o is the output port (one bit for each)
+    _PARAM_POWER = '\xb0'   # 1011 0000 00000000
 
     PORT_A = 0
     PORT_B = 1
@@ -60,13 +63,13 @@ class Dacta:
 
     def taskKeepAlive(self):
         """ Internal task for sending a nop every 2 seconds (or so). """
-        while self._running.isSet():
+        while self._running.is_set():
             time.sleep(1.9)
             self._outQueue.put(self.CMD_NOP)
 
     def taskWrite(self):
         """ Internal task to write commands to the serial port if available. """
-        while self._running.isSet():
+        while self._running.is_set():
             item = self._outQueue.get(block=True).encode()
             if self._ser == None:
                 print(repr(item))
@@ -107,12 +110,10 @@ class Dacta:
 
         buff = self._ser.read(19)
 
-        while self._running.isSet():
-            # if buff[0] == '\0' and len(buff) == 19:
+        while self._running.is_set():
             if buff[0] == 0 and len(buff) == 19:
                 checksum = 0
                 for c in buff:
-                    # checksum += ord(c)
                     checksum += c
                 if (checksum & 0xff) == 0xff:
                     # print("Got a packet!") # debug
@@ -136,8 +137,8 @@ class Dacta:
                     
                     # getting ready to go around again;
                     buff = b'x' + self._ser.read(18)  # the 'x' drops off at the buff[1:] at the end of the while loop
-                    while len(buff) < 19: # only happens if above read times out
-                        print("Warning: missed a packet.")
+                    while len(buff) < 19 and self._running.is_set(): # only happens if above read times out, which can happen on shutdown
+                        print("Warning: missed a byte.")
                         buff = buff + self._ser.read(1)
 
             buff = buff[1:] + self._ser.read(1)  # shift buffer left and read one byte
@@ -154,7 +155,7 @@ class Dacta:
         input value is 2 bytes (b1, b2), with the following format:
         aaaaaaaa aaxxxxxxxx          
 
-        a = analog value (10 bits)  (0-1023) - is this right, or is it 12?
+        a = analog value (10 bits)  (0-1023) 
         x = status value (6 bits)   
       
         """
@@ -255,7 +256,6 @@ class Dacta:
         
         try:
             self._ser = serial.Serial(comPort, 9600, timeout = 2)
-            # print('port opened')
         except serial.SerialException:
             print("Could not open port " + repr(comPort) + "; using stdout instead.")
             self._ser = None
@@ -264,18 +264,11 @@ class Dacta:
         self._threadList.append(threading.Thread(target = self.taskWrite))
         self._threadList.append(threading.Thread(target = self.taskRead))
 
-        # print("threads appended to threadList")
-
         if self._ser != None:
-            # print("self._ser is not None")
             self._ser.write(self._INIT_ON)
-            # print("wrote _INIT_ON")
             # should probably do something with return values here, but I'm lazy
             self._ser.write(self._INIT_START)
-            # print("wrote _INIT_START")
             confirmation = self._ser.read(len(self._INIT_RETURN))
-            # print(f"confirmation {confirmation}, {self._INIT_RETURN}")
-            # print(confirmation == self._INIT_RETURN)
             while confirmation != self._INIT_RETURN:
                 # print(confirmation) # debug
                 confirmation = confirmation[1:] + self._ser.read(1)
